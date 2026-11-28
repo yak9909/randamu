@@ -183,6 +183,7 @@ PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data)
         b.Slider(P_INT + k, nm, -1000000, 1000000, 0, 100, (int)dx5::IntMacroDefault(k));
     }
     b.End(P_INT_TOPIC_END);
+    b.Slider(P_REVISION, "Graph Revision", 0, 1000000, 0, 1000000, 0, false);
 
     if (!b.err && b.next != P_NUM) {
         Log("ParamsSetup: %d parameters, expected %d", b.next, (int)P_NUM);

@@ -101,6 +101,19 @@ void DoWrite(const Write& w)
         ss->AEGP_DisposeStreamValue(&v);
     }
     if (st) ss->AEGP_DisposeStream(st);
+    // the hidden revision: its change makes AE draw the frame again (the graph data's does not)
+    int revSet = 0;
+    if (!eGraph) {
+        AEGP_StreamRefH rs = Stream(w.eff, P_REVISION);
+        AEGP_StreamValue2 rv{};
+        if (rs && !ss->AEGP_GetNewStreamValue(g_pluginId, rs, AEGP_LTimeMode_LayerTime, &t, FALSE, &rv)) {
+            AEGP_StreamValue2 nv = rv;
+            nv.val.one_d = (double)(((long long)rv.val.one_d + 1) % 1000000);
+            if (!ss->AEGP_SetStreamValue(g_pluginId, rs, &nv)) revSet = 1;
+            ss->AEGP_DisposeStreamValue(&rv);
+        }
+        if (rs) ss->AEGP_DisposeStream(rs);
+    }
     int macrosSet = 0;
     for (const dx5::MacroWrite& m : w.macros) {
         AEGP_StreamRefH ms = Stream(w.eff, (m.isInt ? P_INT : P_MACRO) + m.k);
@@ -144,8 +157,8 @@ void DoWrite(const Write& w)
     // the Overview and UPDATE_PARAMS_UI at once (P0)
     Suite<PF_AdvAppSuite2> adv(g_pica, kPFAdvAppSuite, kPFAdvAppSuiteVersion2);
     if (adv) adv->PF_RefreshAllWindows();
-    Log("write (%s): graph %zu bytes (start %d set %d end %d), %d of %zu macro(s) set, %d row(s) shown, %.2f ms", w.why.c_str(),
-        w.text.size(), (int)eStart, (int)eGraph, (int)eEnd, macrosSet, w.macros.size(), shown,
+    Log("write (%s): graph %zu bytes (start %d set %d end %d), revision %s, %d of %zu macro(s) set, %d row(s) shown, %.2f ms",
+        w.why.c_str(), w.text.size(), (int)eStart, (int)eGraph, (int)eEnd, revSet ? "set" : "NOT set", macrosSet, w.macros.size(), shown,
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
 

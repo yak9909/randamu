@@ -92,6 +92,11 @@ PF_Err PreRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
         PF_CHECKIN_PARAM(in_data, &d);
     }
     if (!g) g = std::make_shared<dx5::Graph>();
+    // the hidden revision, read so that it is one of this frame's inputs: AE draws the frame again when it changes
+    // (it does not for the graph data written by the editor: 11/29, tests/ae/run_dx2_live.ps1)
+    AEFX_CLR_STRUCT(d);
+    if (!PF_CHECKOUT_PARAM(in_data, P_REVISION, in_data->current_time, in_data->time_step, in_data->time_scale, &d))
+        PF_CHECKIN_PARAM(in_data, &d);
     AEFX_CLR_STRUCT(d);
     if (!PF_CHECKOUT_PARAM(in_data, P_SEED, in_data->current_time, in_data->time_step, in_data->time_scale, &d)) {
         seed = d.u.sd.value;

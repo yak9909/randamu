@@ -230,6 +230,7 @@ bool UpdateParamsUI(PF_InData* in_data, PF_ParamDef* params[])
     group(P_POINT_TOPIC, P_POINT, kPointMacros, [&](int k) { return st.Animated(P_POINT + k); });
     group(P_LAYER_TOPIC, P_LAYER, kLayers, [&](int k) { return (usedL >> k & 1) || st.LayerId(in_data, P_LAYER + k) != 0; });
     want[P_GRAPH] = 1;  // never shown (PF_PUI_NO_ECW_UI; the flag keeps it out of the timeline too)
+    // EXPERIMENT want[P_REVISION] = 1;
     bool changed = ApplyHidden(in_data, params, st, want);
 
     // the macros' slider ranges from the graph (PF_UpdateParamUI is not saved: applied again every time)

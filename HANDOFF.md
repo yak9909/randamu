@@ -1,5 +1,19 @@
 # 引き継ぎメモ（最新: 2026-11-28 17 時台（PC の時計）。再開はこの冒頭の「再開の手順」から）
 
+## 再開の手順（2026-11-29 1 時、(4) プレビューに反映されない件の原因が判明。利用枠 95% で中断）
+
+- **利用者の回答:** ドラッグ中も離した後も、エディターの変更はすべてプレビューに反映されず、Effect Controls で Macro を動かすまで出ない。
+- **再現（新しい試験 `pwsh tests/ae/run_dx2_live.ps1`、`dx2_live.jsx`・`dx2_live_script.txt`）:** コンポをビューアーで開き、Idle Hook でグラフを
+  書き換える（seed 5 の台本 `set g countX 3`）→ ビューアーが描き直さず、キャッシュを捨てずに描いても古い絵（25 個）。Macro を変えると 15 個。
+- **原因（試して確かめた）:** AE は Arbitrary Data を AEGP で書き換えただけでは描き直さない。数のパラメータが変われば描き直す。
+  ただし **AEGP の HIDDEN フラグを付けたパラメータの変化は無視される**（隠した「Graph Revision」を書いても描き直さず、隠さないと描き直した）。
+- **入れたもの（commit 済み、作業中）:** Disk ID 103 に「Graph Revision」（`P_REVISION`、`dx2_params.h`・`dx2.cpp`）。書き込み（`dx2_editor.cpp` の `DoWrite`）で
+  毎回 +1、PreRender で読む。**今は実験として隠していない**（`dx2_aegp.cpp` の `// EXPERIMENT want[P_REVISION] = 1;`）→ Effect Controls に行が見える。
+- **次の 1 手:** 行を見せずに効かせる方法を試す: (a) AEGP の HIDDEN は付けず `PF_PUI_INVISIBLE`（UI だけ）で隠す、(b) だめなら別の手。
+  `run_dx2_live.ps1` で DX2 LIVE PASS を確かめ、`run_dx2_graph.ps1` 8・32 bpc と `run_dx2_p1_fixture.ps1`（パラメータが 104 個に増えた。P1 の aep が開くか）も。
+  Graph Revision は CANNOT_TIME_VARY にするか検討（キーを打たれないように）。
+- **(10) の Math の並び**は直したが、利用者に見てもらう。
+
 ## 再開の手順（2026-11-29、利用者の試用の指摘 12 件に対応中）
 
 - **利用者の指摘（試用、2026-11-29）:** (1) unused の展開を連打できない（クールタイムをなくす）。(2) ノードの削除を X キーで、右クリックのメニューにも。

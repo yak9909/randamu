@@ -37,11 +37,15 @@ enum Param {
     P_INT_TOPIC = P_GRAPH + 1,                             // 69 (design v5 4.4: appended)
     P_INT = P_INT_TOPIC + 1,                               // 70: Int Macro 1..32
     P_INT_TOPIC_END = P_INT + kIntMacros,                  // 102
+    // the graph's revision, never shown: written with every graph write, because AE does not take a change of the
+    // Arbitrary Data written by an AEGP as a reason to draw the frame again (a number's change it does: 11/29,
+    // tests/ae/run_dx2_live.ps1)
+    P_REVISION = P_INT_TOPIC_END + 1,                      // 103
     P_NUM
 };
 static_assert(P_MACRO == 5 && P_MACRO + kMacros - 1 == 36, "Macro 1..32 are DupliX2-0005..0036 (design v4 8.1)");
 static_assert(P_GRAPH == 68, "the parameter table of design v4 8.1");
-static_assert(P_INT == 70 && P_INT + kIntMacros - 1 == 101 && P_INT_TOPIC_END == 102 && P_NUM == 103,
+static_assert(P_INT == 70 && P_INT + kIntMacros - 1 == 101 && P_INT_TOPIC_END == 102 && P_REVISION == 103 && P_NUM == 104,
               "Int Macro 1..32 are DupliX2-0070..0101 (design v5 4.4)");
 
 enum RenderMode { RM_3D_LAYERS = 1, RM_FAST = 2 };
