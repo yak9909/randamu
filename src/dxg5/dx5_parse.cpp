@@ -234,7 +234,7 @@ struct Parser {
     {
         const Pos open = Peek().pos;
         i++;  // {
-        std::string body;
+        std::string body, starts;
         int depth = 0;
         int line = -1;
         for (;;) {
@@ -243,17 +243,21 @@ struct Parser {
                 Fail("expected '}' to close expr { ... }");
                 return nullptr;
             }
-            if (t.kind == Token::Op && t.text == "}" && depth == 0) {
+            // a formula has no braces: the first } closes the block even inside an unclosed ( (the formula's own
+            // reading then reports the missing ")" on its line)
+            if (t.kind == Token::Op && t.text == "}") {
                 i++;
                 break;
             }
-            if (t.kind == Token::Op && (t.text == "(" || t.text == "[" || t.text == "{")) depth++;
-            if (t.kind == Token::Op && (t.text == ")" || t.text == "]" || t.text == "}")) depth--;
+            if (t.kind == Token::Op && (t.text == "(" || t.text == "[")) depth++;
+            if (t.kind == Token::Op && (t.text == ")" || t.text == "]") && depth > 0) depth--;
             if (t.kind == Token::Newline || (t.kind == Token::Op && t.text == ";")) {
                 if (!body.empty() && body.back() != '\n') body += "\n";
             } else {
                 if (line >= 0 && t.pos.line != line && depth == 0 && !body.empty() && body.back() != '\n') body += "\n";
                 if (!body.empty() && body.back() != '\n') body += " ";
+                // where each line of the body starts in the code (errors inside it are reported there)
+                if (body.empty() || body.back() == '\n') starts += (starts.empty() ? "" : ",") + std::to_string(t.pos.line) + ":" + std::to_string(t.pos.col);
                 body += t.kind == Token::Str ? "\"" + t.text + "\"" : t.text;
             }
             line = t.pos.line;
@@ -261,6 +265,7 @@ struct Parser {
         }
         auto s = Make(Expr::Str, open, body);
         e->named.emplace_back("{}", std::move(s));
+        e->named.emplace_back("{}pos", Make(Expr::Str, open, starts));
         return e;
     }
 

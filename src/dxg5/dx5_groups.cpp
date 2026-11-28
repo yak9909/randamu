@@ -326,8 +326,25 @@ bool GroupByDefinition(Evaluator& ev, const Node& n, Geometry* out)
     return true;
 }
 
+// groups inside groups: a limit on the depth (a graph whose groups call round in a ring stops with a warning)
+struct Depth {
+    static int& N()
+    {
+        thread_local int n = 0;
+        return n;
+    }
+    bool ok;
+    Depth() : ok(++N() <= 64) {}
+    ~Depth() { --N(); }
+};
+
 bool UserGroupGeo(Evaluator& ev, const Node& n, int output, Geometry* out)
 {
+    Depth depth;
+    if (!depth.ok) {
+        ev.Warn(n.key + ": groups call each other too deep");
+        return false;
+    }
     const UserGroup* u = ev.UserGroupOf(n.type);
     if (!u || !u->body || output < 0 || output >= (int)u->def.outputs.size()) return false;
     const Node* ret = nullptr;
@@ -342,6 +359,11 @@ bool UserGroupGeo(Evaluator& ev, const Node& n, int output, Geometry* out)
 
 bool UserGroupValue(Evaluator& ev, const Node& n, int output, const GeoPtr& ctx, Column* out)
 {
+    Depth depth;
+    if (!depth.ok) {
+        ev.Warn(n.key + ": groups call each other too deep");
+        return false;
+    }
     const UserGroup* u = ev.UserGroupOf(n.type);
     if (!u || !u->body || output < 0 || output >= (int)u->def.outputs.size()) return false;
     const Node* ret = nullptr;

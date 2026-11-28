@@ -9,6 +9,7 @@ bool Lex(const std::string& s, std::vector<Token>* out, Diag* err)
 {
     out->clear();
     int line = 1, col = 1, depth = 0;
+    std::vector<int> braces;  // the ( depth outside each open {
     size_t i = 0;
     const size_t n = s.size();
     auto fail = [&](Pos p, const std::string& m) {
@@ -93,6 +94,13 @@ bool Lex(const std::string& s, std::vector<Token>* out, Diag* err)
                 push(Token::Op, o, p);
                 if (o[0] == '(' && len == 1) depth++;
                 if (o[0] == ')' && len == 1 && depth > 0) depth--;
+                // a block's lines count again inside { } (expr(...) { ... } may sit in a call); an ( left open inside
+                // it is dropped at its } (the formula's reading reports it on its own line)
+                if (o[0] == '{' && len == 1) braces.push_back(depth), depth = 0;
+                if (o[0] == '}' && len == 1) {
+                    depth = braces.empty() ? 0 : braces.back();
+                    if (!braces.empty()) braces.pop_back();
+                }
                 adv(len);
                 found = true;
                 break;

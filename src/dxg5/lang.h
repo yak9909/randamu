@@ -62,5 +62,7 @@ struct FormulaSockets {
 FormulaSockets ReadFormula(const std::string& text);
 // The names the fixed list reads in place (not inputs).
 bool IsFormulaBuiltinName(const std::string& name);
+// A name a user's group cannot have: a node's, a math function's, or one a formula reads (design v5 12.1).
+bool ReservedName(const std::string& name);
 
 }  // namespace dx5

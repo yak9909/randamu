@@ -182,6 +182,12 @@ bool IsFormulaBuiltinName(const std::string& s)
     return IsMacroWord(s);
 }
 
+bool ReservedName(const std::string& n)
+{
+    return FindDef(n) || IsMathFunction(n) || IsFormulaBuiltinName(n) || n == "attr" || n == "random" || n == "parent" ||
+           n == "expr" || n == "noise" || n == "group" || n == "return" || n == "each" || n == "if" || n == "else";
+}
+
 bool ParseFormula(const std::string& text, std::vector<FormulaLine>* lines, Diag* err)
 {
     lines->clear();

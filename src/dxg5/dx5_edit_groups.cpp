@@ -12,7 +12,7 @@ namespace dx5 {
 
 namespace {
 
-bool NameTaken(const Graph& g, const std::string& n) { return FindDef(n) || FindUserGroup(g, n); }
+bool NameTaken(const Graph& g, const std::string& n) { return ReservedName(n) || FindUserGroup(g, n); }
 
 std::string FreeName(const Graph& g, const std::string& want, bool numberFirst)
 {
@@ -283,6 +283,11 @@ bool UngroupNode(Graph& g, uint32_t node)
             continue;
         for (InputSlot& s : c.inputs)
             if (s.link.from) outer(Link(s.link), &s);
+        // a node inside an Each zone of the body stays in that zone (its new id)
+        if (c.zone) {
+            auto z = remap.find(c.zone);
+            c.zone = z == remap.end() ? 0 : z->second;
+        }
     }
     const Node* ret = nullptr;
     for (const Node& b : body.nodes)
@@ -457,6 +462,15 @@ bool CloseExpression(Graph& g, uint32_t exprNode, const Graph& inside, std::stri
     };
     const Node* e = g.Find(exprNode);
     if (!e || e->type != "expr") return no("not an Expression node");
+    // an inside that only moved is the formula as written (its _ lines and its spacing stay)
+    {
+        Graph fresh;
+        auto placeless = [](Graph x) {
+            for (Node& n : x.nodes) n.x = n.y = 0;
+            return Serialize(x);
+        };
+        if (OpenExpression(g, exprNode, &fresh) && placeless(fresh) == placeless(inside)) return true;
+    }
     Graph in = inside;
     std::vector<uint32_t> S;
     const Node* ret0 = nullptr;
@@ -497,6 +511,7 @@ bool CloseExpression(Graph& g, uint32_t exprNode, const Graph& inside, std::stri
         const Node* src = s.link.from ? in.Find(s.link.from) : nullptr;
         if (src && src->id == X && s.link.output < (int)xl.size()) f = Renamed(*xl[s.link.output].expr, to);
         else if (src && src->type == "param") f = src->text;
+        else if (src && (src->type == "macro" || src->type == "int_macro")) f = std::string(src->type == "macro" ? "m" : "i") + std::to_string(src->setting);
         else f = ConstFormula(s.value);
         outs.push_back({s.name, f});
     }
@@ -534,10 +549,26 @@ bool SetGroupBody(Graph& g, const std::string& name, const Graph& body, std::str
         }
         params.push_back(p);
     }
+    // the groups the body holds come back out: one changed inside it (an edit in a nested opened group) replaces the
+    // top graph's, one made inside it (Ctrl+G, Copy for Myself there) goes in before this group (it uses it)
+    for (const UserGroup& inner : body.groups) {
+        if (inner.name == name) continue;
+        size_t j = 0;
+        while (j < g.groups.size() && g.groups[j].name != inner.name) j++;
+        if (j < g.groups.size()) {
+            if (j < i) g.groups[j].body = inner.body, g.groups[j].def = inner.def;
+            else return no("the group " + inner.name + " comes after " + name + " and cannot be used in it");
+        } else {
+            if (ReservedName(inner.name)) return no("the group " + inner.name + " is named like a built-in node");
+            g.groups.insert(g.groups.begin() + (long)i, inner);
+            i++;
+        }
+    }
     auto b = std::make_shared<Graph>(body);
     b->groups.assign(g.groups.begin(), g.groups.begin() + (long)i);
     g.groups[i].def = DefFromBody(name, *b, params);
     g.groups[i].body = b;
+    for (const UserGroup& inner : body.groups) RefreshGroups(g, inner.name);
     RefreshGroups(g, name);
     return true;
 }

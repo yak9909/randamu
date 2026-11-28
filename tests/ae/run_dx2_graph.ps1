@@ -53,10 +53,18 @@ function Send-Mouse {
     foreach ($t in 1..5) { Msg $MOVE (250 + 52 * $t) (418 - 54 * $t) $MK_L }
     Msg $UP 524 158 0                                # near the Output's input (510, 148): the wire snaps to it
     Start-Sleep -Seconds 1
+    # the edit box a click on a value opens (looked for up to 3 s: AE may be busy with the wire's write)
+    function Wait-EditBox {
+        foreach ($t in 1..12) {
+            Start-Sleep -Milliseconds 250
+            $b = [AeText]::FindChild($h, "Edit")
+            if ($b -ne [IntPtr]::Zero) { return $b }
+        }
+        return [IntPtr]::Zero
+    }
     Msg $DOWN 200 438 $MK_L                          # the circle's Count
     Msg $UP 200 438 0
-    Start-Sleep -Milliseconds 500
-    $e = [AeText]::FindChild($h, "Edit")
+    $e = Wait-EditBox
     Write-Host ("mouse: editor {0}, edit box {1}" -f $w.Hwnd, [long]$e)
     if ($e -ne [IntPtr]::Zero) {
         # a formula with names is refused in a value's field (design v5 8.3), then a number goes in
@@ -65,8 +73,7 @@ function Send-Mouse {
         Start-Sleep -Milliseconds 500
         Msg $DOWN 200 438 $MK_L
         Msg $UP 200 438 0
-        Start-Sleep -Milliseconds 500
-        $e = [AeText]::FindChild($h, "Edit")
+        $e = Wait-EditBox
     }
     if ($e -ne [IntPtr]::Zero) {
         [AeText]::SetText($e, "9")

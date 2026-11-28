@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <set>
 
 #include "dxg5/lang.h"
 #include "graph/graph.h"
@@ -45,6 +47,67 @@ std::vector<std::string> Split(const std::string& line, size_t restAfter = 0, st
     }
     if (rest) rest->clear();
     return t;
+}
+
+// A formula saved by P1.5 read a named attribute by its bare name (ix); now a bare unknown name is an input
+// (design v5 8.3, 16 4), so on reading, a name the formula uses that has no input slot becomes attr("ix").
+void MigrateFormula(Node& n)
+{
+    const FormulaSockets fs = ReadFormula(n.text);
+    std::set<std::string> bare;
+    for (const std::string& name : fs.inputs)
+        if (!n.In(name)) bare.insert(name);
+    if (bare.empty()) return;
+    std::vector<FormulaLine> lines;
+    Diag d;
+    if (!ParseFormula(n.text, &lines, &d)) return;
+    std::string text;
+    for (const FormulaLine& l : lines) {
+        std::unique_ptr<Expr> e;
+        if (!ParseExpr(PrintExpr(*l.expr), &e, &d)) return;
+        std::function<void(Expr&)> walk = [&](Expr& x) {
+            if (x.kind == Expr::Name && bare.count(x.text)) {
+                auto s = std::make_unique<Expr>();
+                s->kind = Expr::Str, s->text = x.text;
+                x.kind = Expr::Call, x.text = "attr";
+                x.args.clear();
+                x.args.push_back(std::move(s));
+                return;
+            }
+            if (x.kind == Expr::Member && x.args[0]->kind == Expr::Name && x.args[0]->text == "parent") return;
+            for (auto& a : x.args) walk(*a);
+            for (auto& a : x.named) walk(*a.second);
+        };
+        walk(*e);
+        if (!text.empty()) text += "\n";
+        text += lines.size() == 1 && l.name == "value" ? PrintExpr(*e) : l.name + " = " + PrintExpr(*e);
+    }
+    n.text = text;
+}
+
+// a node's text on one line: a formula of several lines (design v5 8.3) keeps its line breaks as \n
+std::string EscapeLine(const std::string& s)
+{
+    std::string o;
+    for (char c : s) {
+        if (c == '\\') o += "\\\\";
+        else if (c == '\n') o += "\\n";
+        else if (c != '\r') o += c;
+    }
+    return o;
+}
+std::string UnescapeLine(const std::string& s)
+{
+    std::string o;
+    for (size_t k = 0; k < s.size(); k++) {
+        if (s[k] == '\\' && k + 1 < s.size() && (s[k + 1] == 'n' || s[k + 1] == '\\')) {
+            o += s[k + 1] == 'n' ? '\n' : '\\';
+            k++;
+        } else {
+            o += s[k];
+        }
+    }
+    return o;
 }
 
 std::string ValueText(const Value& v)
@@ -510,7 +573,7 @@ std::string SerializeBody(const Graph& g, bool top)
                 if (!v.empty()) s += "in " + std::to_string(n.id) + " " + in.name + " const " + v + "\n";
             }
         }
-        if (!n.text.empty() && !math) s += "text " + std::to_string(n.id) + " " + n.text + "\n";
+        if (!n.text.empty() && !math) s += "text " + std::to_string(n.id) + " " + EscapeLine(n.text) + "\n";
     }
     for (const std::string& l : g.unknownLines) s += l + "\n";
     return s;
@@ -609,7 +672,7 @@ bool ParseBody(const std::string& text, Graph* gp)
             b->groups = g.groups;  // the groups before it
             if (!ParseBody(bodyText, b.get())) return false;
             u.body = b;
-            if (!FindDef(u.name) && !FindUserGroup(g, u.name)) g.groups.push_back(u);
+            if (!ReservedName(u.name) && !FindUserGroup(g, u.name)) g.groups.push_back(u);
             if (pos > text.size()) break;
             continue;
         }
@@ -670,7 +733,7 @@ bool ParseBody(const std::string& text, Graph* gp)
             t = Split(line, 2, &rest);
             uint32_t id = 0;
             Node* n = ParseInt(t[1], &id) ? g.Find(id) : nullptr;
-            if (n) n->text = rest;
+            if (n) n->text = UnescapeLine(rest);
             else known = false;
         } else {
             known = false;
@@ -684,6 +747,8 @@ bool ParseBody(const std::string& text, Graph* gp)
             if (s.link.from && !g.Find(s.link.from)) s.link = {};
     for (const Node& n : g.nodes)
         if (n.id >= g.nextId) g.nextId = n.id + 1;
+    for (Node& n : g.nodes)
+        if (n.type == "expr") MigrateFormula(n);
     return true;
 }
 

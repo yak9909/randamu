@@ -2,6 +2,7 @@
 // made of operators, math functions and input values (attributes, macros, time, variables) is one Expression node.
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <set>
@@ -151,7 +152,7 @@ public:
     bool DefineGroup(const Stmt& s)
     {
         const std::string& name = s.names[0];
-        if (FindDef(name)) return Err(s.pos, "a group cannot be named " + name + ": that is a built-in node");
+        if (ReservedName(name)) return Err(s.pos, "a group cannot be named " + name + ": the name is taken by a node, a function or a formula");
         if (FindUserGroup(g_, name)) return Err(s.pos, "the group " + name + " is defined twice");
         static const Graph none;
         const UserGroup* old = FindUserGroup(prev_, name);
@@ -620,19 +621,39 @@ private:
     bool ExprBlock(const Expr& e, const std::string& key, const Env& env, Ref* r)
     {
         const Expr* body = nullptr;
-        for (const auto& a : e.named)
+        std::vector<Pos> starts;  // where each line of the body starts in the code
+        for (const auto& a : e.named) {
             if (a.first == "{}") body = a.second.get();
+            if (a.first == "{}pos") {
+                const std::string& t = a.second->text;
+                for (size_t k = 0; k < t.size();) {
+                    size_t c = t.find(',', k);
+                    if (c == std::string::npos) c = t.size();
+                    const std::string one = t.substr(k, c - k);
+                    const size_t colon = one.find(':');
+                    if (colon != std::string::npos) starts.push_back({std::atoi(one.c_str()), std::atoi(one.c_str() + colon + 1)});
+                    k = c + 1;
+                }
+            }
+        }
         if (!body) return Err(e.pos, "expr(...) needs its formula: expr(...) { x = ... }");
         if (!e.args.empty()) return Err(e.pos, "expr(...) takes its inputs by name: expr(k: 3) { ... }");
+        // a position in the body's text (line, column) as a position in the code
+        auto at = [&](int line, int col) -> Pos {
+            if (line < 1 || line > (int)starts.size()) return body->pos;
+            const Pos s = starts[line - 1];
+            return {s.line, s.col + std::max(0, col - 1)};
+        };
         std::vector<FormulaLine> lines;
         Diag d;
-        if (!ParseFormula(body->text, &lines, &d)) return Err(body->pos, d.msg);
+        if (!ParseFormula(body->text, &lines, &d)) return Err(at(d.pos.line, d.pos.col), d.msg);
+        int lineNo = 0;  // the line being read (errors inside it are reported at its start)
         const uint32_t id = NewNode("expr", key);
         const std::string nkey = g_.Find(id)->key;
         std::map<std::string, Ref> ins;
         bool field = false;
         for (const auto& a : e.named) {
-            if (a.first == "{}") continue;
+            if (a.first == "{}" || a.first == "{}pos") continue;
             Ref v;
             if (!Value_(*a.second, nkey + "." + a.first, env, &v)) return false;
             if (v.geo()) return Err(a.second->pos, "a geometry cannot be an Expression's input");
@@ -653,7 +674,7 @@ private:
                     return true;
                 }
                 if (const Ref* v = Var(s)) {
-                    if (v->geo()) return Err(e.pos, "'" + s + "' is a geometry, not a value");
+                    if (v->geo()) return Err(at(lineNo, 1), "'" + s + "' is a geometry, not a value");
                     ins[s] = *v;
                     field |= v->field;
                     return true;
@@ -667,7 +688,7 @@ private:
                     field = true;
                     return true;
                 }
-                return Err(e.pos, "unknown name '" + s + "' in expr { }");
+                return Err(at(lineNo, 1), "unknown name '" + s + "' in expr { }");
             }
             case Expr::Member:
                 if (x.args[0]->kind == Expr::Name && x.args[0]->text == "parent") {
@@ -694,11 +715,11 @@ private:
                     field = true;
                     return true;
                 }
-                if (!IsMathFunction(x.text) || !x.named.empty()) return Err(e.pos, x.text + "() cannot be in a formula (use a node and wire it in)");
+                if (!IsMathFunction(x.text) || !x.named.empty()) return Err(at(lineNo, 1), x.text + "() cannot be in a formula (use a node and wire it in)");
                 break;
             case Expr::Str:
             case Expr::Lambda:
-            case Expr::MemberExpr: return Err(e.pos, "not a formula");
+            case Expr::MemberExpr: return Err(at(lineNo, 1), "not a formula");
             default: break;
             }
             for (auto& a : x.args)
@@ -707,6 +728,7 @@ private:
         };
         std::string text;
         for (FormulaLine& l : lines) {
+            lineNo++;
             std::unique_ptr<Expr> c = Clone(*l.expr);
             if (!walk(*c)) return false;
             earlier.insert(l.name);
