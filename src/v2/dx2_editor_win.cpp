@@ -61,9 +61,10 @@ struct HitInfo {
     bool isInt = false;
 };
 
-enum class Drag { None, Move, Wire, Scrub, Pan, MacroLink };
+enum class Drag { None, Move, Wire, Scrub, Pan, MacroLink, Box };
 enum class View { Nodes, Stack, Code };
 constexpr int kApplyId = 9001;
+constexpr UINT_PTR kProblemTimer = 1;
 constexpr double kZoomMin = 0.3, kZoomMax = 3, kSnap = 24;
 
 struct MacroRowInfo {
@@ -112,6 +113,7 @@ struct Win {
     uint32_t dragNode = 0;
     int dragIndex = 0;
     double startX = 0, startY = 0, startValue = 0;
+    std::vector<std::pair<uint32_t, POINT>> moveFrom;  // the nodes a title drag moves, where they started (x100)
     bool moved = false;
     // the edit box: what it edits
     uint32_t editNode = 0;
@@ -132,6 +134,7 @@ struct Win {
     bool unusedOpen = false;  // the macros panel's "unused" list unfolded
     bool editMultiline = false;
     std::string macroLog;     // the last "macros used / unused" logged
+    std::vector<std::string> problems;  // what the last render of this graph found (the Overview shows one line)
 } g_win;
 
 // The graph the node view shows: the effect's, or the inside of what is opened.
@@ -151,6 +154,16 @@ std::string U8(const std::wstring& w)
     const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
     std::string s((size_t)std::max(n - 1, 0), '\0');
     if (n > 1) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &s[0], n, nullptr, nullptr);
+    return s;
+}
+
+// a Float always shows it is one: 100.0, not 100 (the user, 11/29)
+std::string FloatText(double v)
+{
+    char b[64];
+    snprintf(b, sizeof(b), "%.6g", v);
+    std::string s = b;
+    if (s.find_first_of(".eEn") == std::string::npos) s += ".0";
     return s;
 }
 
@@ -332,9 +345,9 @@ std::string ConstText(const dx5::Node& n, const dx5::InputSlot& s)
     switch (v.type) {
     case dx5::Type::Int: return Num((double)v.i, true);
     case dx5::Type::Bool: return v.i ? "true" : "false";
-    case dx5::Type::Vector: return Num(v.v.x, false) + ", " + Num(v.v.y, false) + ", " + Num(v.v.z, false);
+    case dx5::Type::Vector: return FloatText(v.v.x) + ", " + FloatText(v.v.y) + ", " + FloatText(v.v.z);
     case dx5::Type::Rotation: return "(rotation)";
-    default: return Num(v.f, false);
+    default: return FloatText(v.f);
     }
 }
 
@@ -555,11 +568,15 @@ void PaintNodes(HDC dc, const RECT& client)
                 a = b + 1;
             }
         } else if (dx5::IsMathFamily(n.type)) {
-            // the operator (click: choose another)
-            RECT tr = TextRect(n);
-            FillRect(dc, tr, RGB(40, 40, 44));
-            tr.left += Z(5), tr.right -= Z(5);
-            Text(dc, n.text + "  \xE2\x96\xBE", tr, kText, DT_LEFT);  // ▾
+            // the operator in the values' column, its label in the names' (the rows line up: the user, 11/29)
+            const RECT tr = TextRect(n);
+            RECT lab = {r.left + Z(10), tr.top, r.left + Z(kNodeW / 2 - 4), tr.bottom};
+            Text(dc, "op", lab, kDim, DT_LEFT);
+            RECT box = {r.left + Z(kNodeW / 2), tr.top, r.right - Z(6), tr.bottom};
+            FillRect(dc, box, RGB(40, 40, 44));
+            box.left += Z(5), box.right -= Z(5);
+            Text(dc, n.text, box, kText, DT_LEFT);
+            Text(dc, "\xE2\x96\xBE", box, kDim, DT_RIGHT);  // ▾
         }
         for (int i = 0; i < (int)n.inputs.size(); i++) {
             if (!Shown(n, i)) continue;
@@ -567,7 +584,9 @@ void PaintNodes(HDC dc, const RECT& client)
             const dx5::InputDef* id = InDef(n, in.name);
             RECT lr = {r.left + Z(10), RowTop(n, FirstInputRow(n) + ShownIndex(n, i)), r.left + Z(kNodeW / 2 - 4), 0};
             lr.bottom = lr.top + Z(kRowH);
-            Text(dc, in.name, lr, kDim, DT_LEFT);
+            // a math node's input says what its operator takes (rot_apply: a is a Rotation, b a Vector)
+            const dx5::Type mt = dx5::MathInputType(g, n, i);
+            Text(dc, mt == dx5::Type::Any ? in.name : in.name + "  " + dx5::TypeName(mt), lr, kDim, DT_LEFT);
             if (!id || id->type != dx5::Type::Geometry) {
                 RECT vr = ValueRect(n, i);
                 if (!in.link.from) {
@@ -583,6 +602,14 @@ void PaintNodes(HDC dc, const RECT& client)
             }
             Port(dc, InPort(n, i), TypeColor(id ? id->type : dx5::Type::Float), in.link.from != 0);
         }
+    }
+    if (g_win.drag == Drag::Box && g_win.moved) {
+        HPEN bp = CreatePen(PS_DOT, 1, RGB(170, 190, 230));
+        HGDIOBJ op = SelectObject(dc, bp), ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        Rectangle(dc, std::min(g_win.start.x, g_win.now.x), std::min(g_win.start.y, g_win.now.y), std::max(g_win.start.x, g_win.now.x),
+                  std::max(g_win.start.y, g_win.now.y));
+        SelectObject(dc, op), SelectObject(dc, ob);
+        DeleteObject(bp);
     }
     if (g_win.drag == Drag::MacroLink && g_win.moved && g_win.macroDragK >= 0) {
         // the macro being dragged, under the cursor
@@ -609,6 +636,18 @@ void PaintNodes(HDC dc, const RECT& client)
         Text(dc, "No Output node: right-click to add one", m, kWarn, DT_LEFT);
     }
 
+    // what the render found, over the bottom of the canvas (the Effect Controls show the first line only)
+    if (!g_win.problems.empty()) {
+        const int rows = std::min<int>(4, (int)g_win.problems.size());
+        RECT pr = {c.left + 8, c.bottom - 10 - rows * 18, c.right - 8, c.bottom - 6};
+        FillRect(dc, pr, RGB(56, 44, 36));
+        for (int k = 0; k < rows; k++) {
+            RECT lr = {pr.left + 8, pr.top + 2 + k * 18, pr.right - 8, pr.top + 2 + (k + 1) * 18};
+            std::string t = "\xE2\x9A\xA0 " + g_win.problems[k];  // a warning sign
+            if (k == rows - 1 && (int)g_win.problems.size() > rows) t += "   (+" + std::to_string(g_win.problems.size() - rows) + " more)";
+            Text(dc, t, lr, kWarn, DT_LEFT);
+        }
+    }
     // the status line
     RECT st = {client.left + 8, client.bottom - kStatusH, client.right - kPanelW, client.bottom};
     FillRect(dc, {client.left, client.bottom - kStatusH, client.right - kPanelW, client.bottom}, kTabC);
@@ -962,7 +1001,6 @@ void BeginValueEdit(const dx5::Node& n, int input)
     BeginEdit(ValueRect(n, input), text, g_win.zFont);
 }
 
-void SearchMenu(POINT client, const std::string& text);
 
 void EndEdit(bool commit)
 {
@@ -980,11 +1018,6 @@ void EndEdit(bool commit)
     std::string text;
     for (char c : U8(buf))
         if (c != '\r') text += c;
-    if (g_win.editSearch) {
-        g_win.editSearch = false;
-        if (g_win.enterPressed) SearchMenu(g_win.searchAt, text);  // not when the box only lost the focus
-        return Redraw();
-    }
     if (g_win.editMacro >= 0) {
         if (dx5::RenameMacro(s->graph, g_win.editMacroInt, g_win.editMacro, text)) Commit("rename macro");
     } else if (g_win.editExprText) {
@@ -1027,24 +1060,249 @@ void EndEdit(bool commit)
     Redraw();
 }
 
-// ---- menus ----
-enum MenuId { M_ADD = 1000, M_SEARCH = 100, M_EXPOSE = 200, M_RESET, M_UNLINK, M_EXPAND, M_CONNECTEXPR, M_LINK = 300, M_LINKI = 400, M_CHOICE = 500, M_UNWIRE = 600 };
+// ---- menus: the editor's own (dark, one list, typing filters it: the user, 11/29) ----
+struct MenuItem {
+    std::string text;
+    int id = 0;
+    bool enabled = true, checked = false, header = false;
+    std::string hint;  // dim, at the right (a category, a key)
+};
 
-std::string MenuLabel(const dx5::NodeDef& d)
-{
-    return d.category == "Math" && d.name.rfind("math_", 0) == 0 ? d.name.substr(5) : d.label;
-}
+struct MenuState {
+    std::vector<MenuItem> items;
+    std::vector<int> shown;  // indices of items in view (all, or those matching the filter)
+    std::string filter;
+    bool searchable = false;
+    int hot = -1;            // index into shown
+    int top = 0;             // first row of shown in view
+    int result = 0;
+    bool done = false;
+    HWND wnd = nullptr;
+};
+MenuState* g_menu = nullptr;
+constexpr int kMenuRow = 22, kMenuW = 280, kMenuRows = 20;
+
 std::string Lower(std::string s)
 {
     for (char& c : s) c = (char)std::tolower((unsigned char)c);
     return s;
 }
 
-// Adds a node of defs[index] where the menu was opened (client point).
+bool Pickable(const MenuItem& it) { return it.enabled && !it.header; }
+
+void MenuFilter(MenuState& m)
+{
+    m.shown.clear();
+    const std::string q = Lower(m.filter);
+    for (int i = 0; i < (int)m.items.size(); i++) {
+        const MenuItem& it = m.items[i];
+        if (!q.empty() && (it.header || (Lower(it.text) + " " + Lower(it.hint)).find(q) == std::string::npos)) continue;
+        m.shown.push_back(i);
+    }
+    m.hot = -1, m.top = 0;
+    for (int k = 0; k < (int)m.shown.size(); k++)
+        if (Pickable(m.items[m.shown[k]])) {
+            m.hot = q.empty() ? -1 : k;  // typing picks the first match (Enter takes it)
+            break;
+        }
+}
+
+int MenuHead(const MenuState& m) { return m.searchable ? kMenuRow : 0; }
+
+void MenuScrollTo(MenuState& m, int k)
+{
+    if (k < m.top) m.top = k;
+    if (k >= m.top + kMenuRows) m.top = k - kMenuRows + 1;
+}
+
+void MenuMove(MenuState& m, int dir)
+{
+    const int n = (int)m.shown.size();
+    for (int step = 0, k = m.hot; step < n; step++) {
+        k = k < 0 ? (dir > 0 ? 0 : n - 1) : (k + dir + n) % n;
+        if (Pickable(m.items[m.shown[k]])) {
+            m.hot = k;
+            MenuScrollTo(m, k);
+            return;
+        }
+    }
+}
+
+void MenuPick(MenuState& m, int k)
+{
+    if (k < 0 || k >= (int)m.shown.size() || !Pickable(m.items[m.shown[k]])) return;
+    m.result = m.items[m.shown[k]].id;
+    m.done = true;
+}
+
+LRESULT CALLBACK MenuProc(HWND h, UINT msg, WPARAM w, LPARAM l)
+{
+    MenuState* m = g_menu;
+    if (!m) return DefWindowProcW(h, msg, w, l);
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT r;
+        GetClientRect(h, &r);
+        FillRect(dc, r, RGB(40, 40, 44));
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, g_win.font);
+        if (m->searchable) {
+            RECT s = {6, 2, r.right - 6, kMenuRow - 2};
+            FillRect(dc, s, RGB(30, 30, 33));
+            s.left += 6;
+            Text(dc, m->filter.empty() ? "Type to search" : m->filter + "_", s, m->filter.empty() ? kDim : kText, DT_LEFT);
+        }
+        for (int row = 0; row < kMenuRows && m->top + row < (int)m->shown.size(); row++) {
+            const int k = m->top + row;
+            const MenuItem& it = m->items[m->shown[k]];
+            RECT ir = {0, MenuHead(*m) + row * kMenuRow, r.right, MenuHead(*m) + (row + 1) * kMenuRow};
+            if (k == m->hot) FillRect(dc, ir, RGB(62, 86, 128));
+            if (it.header) {
+                SelectObject(dc, g_win.bold);
+                RECT t = {ir.left + 8, ir.top, ir.right - 8, ir.bottom};
+                Text(dc, it.text, t, kDim, DT_LEFT);
+                SelectObject(dc, g_win.font);
+                continue;
+            }
+            RECT t = {ir.left + 24, ir.top, ir.right - 90, ir.bottom};
+            if (it.checked) Text(dc, "\xE2\x9C\x93", {ir.left + 6, ir.top, ir.left + 22, ir.bottom}, kText, DT_LEFT);  // ✓
+            Text(dc, it.text, t, it.enabled ? kText : RGB(110, 110, 110), DT_LEFT);
+            if (!it.hint.empty()) Text(dc, it.hint, {ir.right - 88, ir.top, ir.right - 8, ir.bottom}, kDim, DT_RIGHT);
+        }
+        if ((int)m->shown.size() > kMenuRows) {
+            // where the view is in a longer list
+            const int total = (int)m->shown.size(), hh = r.bottom - MenuHead(*m);
+            const int y0 = MenuHead(*m) + hh * m->top / total, y1 = MenuHead(*m) + hh * (m->top + kMenuRows) / total;
+            FillRect(dc, {r.right - 4, y0, r.right - 1, y1}, RGB(90, 90, 96));
+        }
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        const int y = GET_Y_LPARAM(l) - MenuHead(*m);
+        const int k = y < 0 ? -1 : m->top + y / kMenuRow;
+        const int hot = k >= 0 && k < (int)m->shown.size() && Pickable(m->items[m->shown[k]]) ? k : -1;
+        if (hot != m->hot) m->hot = hot, InvalidateRect(h, nullptr, FALSE);
+        return 0;
+    }
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN: {
+        // the menu holds the mouse: a press outside it closes it
+        const POINT p = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+        RECT r;
+        GetClientRect(h, &r);
+        if (p.x < 0 || p.y < 0 || p.x >= r.right || p.y >= r.bottom) m->done = true;
+        return 0;
+    }
+    case WM_LBUTTONUP:
+    case WM_RBUTTONUP: {
+        const int y = GET_Y_LPARAM(l) - MenuHead(*m);
+        if (y >= 0 && GET_X_LPARAM(l) >= 0) MenuPick(*m, m->top + y / kMenuRow);
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        const int maxTop = std::max(0, (int)m->shown.size() - kMenuRows);
+        m->top = std::clamp(m->top - GET_WHEEL_DELTA_WPARAM(w) / WHEEL_DELTA * 3, 0, maxTop);
+        InvalidateRect(h, nullptr, FALSE);
+        return 0;
+    }
+    case WM_KEYDOWN:
+        if (w == VK_ESCAPE) m->done = true;
+        else if (w == VK_RETURN) MenuPick(*m, m->hot);
+        else if (w == VK_DOWN) MenuMove(*m, 1);
+        else if (w == VK_UP) MenuMove(*m, -1);
+        else if (w == VK_BACK && m->searchable && !m->filter.empty()) m->filter.pop_back(), MenuFilter(*m);
+        InvalidateRect(h, nullptr, FALSE);
+        return 0;
+    case WM_CHAR:
+        if (m->searchable && w >= 32 && w < 127) {
+            m->filter += (char)w;
+            MenuFilter(*m);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    case WM_CAPTURECHANGED:
+        if ((HWND)l != h) m->done = true;  // another window took the mouse
+        return 0;
+    }
+    return DefWindowProcW(h, msg, w, l);
+}
+
+// Shows the menu at `client` (the editor's client point) and waits for a choice: its id, or 0 when it was closed.
+int PickMenu(POINT client, std::vector<MenuItem> items, bool searchable)
+{
+    if (items.empty()) return 0;
+    static bool registered = false;
+    HINSTANCE inst = (HINSTANCE)GetWindowLongPtrW(g_win.wnd, GWLP_HINSTANCE);
+    if (!registered) {
+        WNDCLASSW wc{};
+        wc.style = CS_DROPSHADOW;
+        wc.lpfnWndProc = MenuProc;
+        wc.hInstance = inst;
+        wc.lpszClassName = L"DupliX2Menu";
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        registered = RegisterClassW(&wc) != 0;
+    }
+    MenuState m;
+    m.items = std::move(items);
+    m.searchable = searchable;
+    MenuFilter(m);
+    const int rows = std::min(kMenuRows, (int)m.shown.size());
+    int width = kMenuW;
+    {
+        HDC dc = GetDC(g_win.wnd);
+        HGDIOBJ old = SelectObject(dc, g_win.font);
+        for (const MenuItem& it : m.items) {
+            SIZE sz{};
+            const std::wstring t = W(it.text);
+            GetTextExtentPoint32W(dc, t.c_str(), (int)t.size(), &sz);
+            width = std::max(width, (int)sz.cx + 24 + 96);
+        }
+        SelectObject(dc, old);
+        ReleaseDC(g_win.wnd, dc);
+    }
+    width = std::min(width, 520);
+    const int height = MenuHead(m) + rows * kMenuRow + 2;
+    POINT sp = client;
+    ClientToScreen(g_win.wnd, &sp);
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(MonitorFromPoint(sp, MONITOR_DEFAULTTONEAREST), &mi);
+    sp.x = std::min<long>(sp.x, mi.rcWork.right - width), sp.y = std::min<long>(sp.y, mi.rcWork.bottom - height);
+    sp.x = std::max<long>(sp.x, mi.rcWork.left), sp.y = std::max<long>(sp.y, mi.rcWork.top);
+    g_menu = &m;
+    m.wnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"DupliX2Menu", L"", WS_POPUP | WS_BORDER, sp.x, sp.y, width, height,
+                            g_win.wnd, nullptr, inst, nullptr);
+    if (!m.wnd) {
+        g_menu = nullptr;
+        return 0;
+    }
+    ShowWindow(m.wnd, SW_SHOWNA);
+    UpdateWindow(m.wnd);
+    SetCapture(m.wnd);
+    MSG msg;
+    while (!m.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        // the keys go to the menu (the focus stays on the editor)
+        if (msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST) msg.hwnd = m.wnd;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    if (GetCapture() == m.wnd) ReleaseCapture();
+    g_menu = nullptr;
+    DestroyWindow(m.wnd);
+    return m.result;
+}
+
+enum MenuId { M_ADD = 1000, M_EXPOSE = 200, M_RESET, M_UNLINK, M_EXPAND, M_CONNECTEXPR, M_LINKMENU, M_LINK = 300, M_LINKI = 400,
+              M_CHOICE = 500, M_UNWIRE = 600 };
+
+std::string MenuLabel(const dx5::NodeDef& d) { return d.label; }
+
+// Adds a node of defs[index] (past the table: the user's groups, design v5 12.1) where the menu was opened.
 void AddAt(POINT client, size_t index)
 {
     const auto& defs = dx5::AllDefs();
-    // past the table: the user's groups (design v5 12.1)
     std::string type;
     if (index < defs.size()) type = defs[index].name;
     else if (index - defs.size() < G().groups.size()) type = G().groups[index - defs.size()].name;
@@ -1052,76 +1310,46 @@ void AddAt(POINT client, size_t index)
     const double x = (client.x - g_win.panX) / g_win.zoom, y = (client.y - kTabH - g_win.panY) / g_win.zoom;
     const uint32_t nid = dx5::AddNodeAt(G(), type, x, y);
     if (nid) {
-        g_win.selected = nid;
+        g_win.selected = nid, g_win.multi.clear();
         Save("add node");
     }
 }
 
-int Track(HMENU m, POINT client)
-{
-    POINT sp = client;
-    ClientToScreen(g_win.wnd, &sp);
-    return TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, sp.x, sp.y, 0, g_win.wnd, nullptr);
-}
-
+// The add menu (right-click on empty space, Ctrl+A): every node under its category; typing searches them.
 void AddMenu(POINT client)
 {
-    HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING, M_SEARCH, L"Search...");
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    std::map<std::string, HMENU> sub;
+    std::vector<MenuItem> items;
     const char* order[] = {"Generate", "Set", "Geometry", "Input", "Math", "Utility", "Group", "Zone", "Output"};
-    for (const char* cat : order) sub[cat] = CreatePopupMenu();
     const auto& defs = dx5::AllDefs();
     // inside an Expression only formula nodes (design v5 8.3); inside a group no Output (its output is the group's)
     const bool inExpr = !g_win.frames.empty() && g_win.frames.back().expr;
-    for (size_t i = 0; i < defs.size(); i++) {
-        const dx5::NodeDef& d = defs[i];
-        auto it = sub.find(d.category);
-        if (it == sub.end() || d.name == "each") continue;
-        if (inExpr && d.category != "Math" && d.category != "Input") continue;
-        if (!g_win.frames.empty() && d.name == "output") continue;
-        const bool off = d.name == "output" && G().OutputNode();
-        AppendMenuW(it->second, MF_STRING | (off ? MF_GRAYED : 0), M_ADD + (UINT)i, W(MenuLabel(d)).c_str());
-    }
-    if (!inExpr)
-        for (size_t j = 0; j < G().groups.size(); j++)
-            AppendMenuW(sub["Group"], MF_STRING, M_ADD + (UINT)(defs.size() + j), W(G().groups[j].name).c_str());
     for (const char* cat : order) {
-        if (GetMenuItemCount(sub[cat]) > 0) AppendMenuW(m, MF_POPUP, (UINT_PTR)sub[cat], W(cat).c_str());
-        else DestroyMenu(sub[cat]);
+        const size_t head = items.size();
+        for (size_t i = 0; i < defs.size(); i++) {
+            const dx5::NodeDef& d = defs[i];
+            if (d.category != cat || d.name == "each") continue;
+            if (inExpr && d.category != std::string("Math") && d.category != std::string("Input")) continue;
+            if (!g_win.frames.empty() && d.name == "output") continue;
+            MenuItem it;
+            it.text = MenuLabel(d), it.id = M_ADD + (int)i, it.hint = cat;
+            it.enabled = !(d.name == "output" && G().OutputNode());
+            items.push_back(it);
+        }
+        if (std::string(cat) == "Group" && !inExpr)
+            for (size_t j = 0; j < G().groups.size(); j++) {
+                MenuItem it;
+                it.text = G().groups[j].name, it.id = M_ADD + (int)(defs.size() + j), it.hint = "Group (yours)";
+                items.push_back(it);
+            }
+        if (items.size() > head) {
+            MenuItem h;
+            h.text = cat, h.header = true;
+            items.insert(items.begin() + (long)head, h);
+        }
     }
-    const int id = Track(m, client);
-    DestroyMenu(m);
-    if (id == M_SEARCH) {
-        // a box where the menu was: type part of a name, Enter shows the nodes that match
-        g_win.editSearch = true, g_win.editMacro = -1, g_win.editExprText = false, g_win.editInput = -1;
-        g_win.searchAt = client;
-        BeginEdit({client.x, client.y, client.x + 180, client.y + 22}, "");
-        return;
-    }
+    const int id = PickMenu(client, items, true);
     if (id >= M_ADD && id < M_ADD + (int)(defs.size() + G().groups.size())) AddAt(client, (size_t)(id - M_ADD));
     Redraw();
-}
-
-// the nodes whose name or label holds `text` (one match is added at once)
-void SearchMenu(POINT client, const std::string& text)
-{
-    const std::string q = Lower(text);
-    const auto& defs = dx5::AllDefs();
-    std::vector<size_t> hits;
-    for (size_t i = 0; i < defs.size(); i++) {
-        const dx5::NodeDef& d = defs[i];
-        if (d.name == "each" || (d.name == "output" && G().OutputNode())) continue;
-        if (q.empty() || Lower(d.name).find(q) != std::string::npos || Lower(d.label).find(q) != std::string::npos) hits.push_back(i);
-    }
-    if (hits.empty()) return Refused("no node matches '" + text + "'");
-    if (hits.size() == 1) return AddAt(client, hits[0]);
-    HMENU m = CreatePopupMenu();
-    for (size_t i : hits) AppendMenuW(m, MF_STRING, M_ADD + (UINT)i, W(MenuLabel(defs[i]) + "   (" + defs[i].category + ")").c_str());
-    const int id = Track(m, client);
-    DestroyMenu(m);
-    if (id >= M_ADD && id < M_ADD + (int)defs.size()) AddAt(client, (size_t)(id - M_ADD));
 }
 
 void ValueMenu(POINT client, uint32_t node, int index)
@@ -1132,41 +1360,53 @@ void ValueMenu(POINT client, uint32_t node, int index)
     const dx5::InputSlot slot = n->inputs[index];
     const dx5::InputDef* d = InDef(*n, slot.name);
     if (d && d->type == dx5::Type::Geometry) return;
-    HMENU m = CreatePopupMenu();
+    std::vector<MenuItem> items;
+    auto add = [&](const std::string& t, int id, bool on = true, bool checked = false) {
+        MenuItem it;
+        it.text = t, it.id = id, it.enabled = on, it.checked = checked;
+        items.push_back(it);
+    };
     if (d && !d->choices.empty()) {
         const std::string& c = d->choices;
         size_t a = 0;
         for (int i = 0; a != std::string::npos; i++) {
             const size_t b = c.find('|', a);
-            const std::string item = c.substr(a, b == std::string::npos ? std::string::npos : b - a);
-            AppendMenuW(m, MF_STRING | (dx5::AsInt(slot.value) == i ? MF_CHECKED : 0), M_CHOICE + i, W(item).c_str());
+            add(c.substr(a, b == std::string::npos ? std::string::npos : b - a), M_CHOICE + i, true, dx5::AsInt(slot.value) == i);
             a = b == std::string::npos ? b : b + 1;
         }
     } else {
         const bool isInt = d && (d->type == dx5::Type::Int || d->structural);
         // Expose writes the macro's value with the graph: at the effect's graph only; without a free macro it says why
         const std::string refusal = dx5::ExposeRefusal(s->graph, isInt);
-        AppendMenuW(m, MF_STRING | (!refusal.empty() || slot.link.from || !g_win.frames.empty() ? MF_GRAYED : 0), M_EXPOSE,
-                    !refusal.empty() ? W(refusal).c_str() : isInt ? L"Expose to Int Macro" : L"Expose to Macro");
-        if (!slot.link.from) AppendMenuW(m, MF_STRING, M_CONNECTEXPR, L"Connect Expression");
-        HMENU link = CreatePopupMenu(), linkM = CreatePopupMenu(), linkI = CreatePopupMenu();
-        for (int k = 0; k < 32; k++) {
-            AppendMenuW(linkM, MF_STRING, M_LINK + k, W("M" + std::to_string(k + 1) + "  " + dx5::MacroLabel(s->graph, false, k)).c_str());
-            AppendMenuW(linkI, MF_STRING, M_LINKI + k, W("I" + std::to_string(k + 1) + "  " + dx5::MacroLabel(s->graph, true, k)).c_str());
-        }
-        AppendMenuW(link, MF_POPUP, (UINT_PTR)linkM, L"M  Macro");
-        AppendMenuW(link, MF_POPUP, (UINT_PTR)linkI, L"I  Int Macro");
-        AppendMenuW(m, MF_POPUP, (UINT_PTR)link, L"Link to Macro");
-        if (slot.link.from) AppendMenuW(m, MF_STRING, M_UNLINK, L"Unlink");
+        add(!refusal.empty() ? refusal : isInt ? "Expose to Int Macro" : "Expose to Macro", M_EXPOSE,
+            refusal.empty() && !slot.link.from && g_win.frames.empty());
+        add("Link to Macro...", M_LINKMENU);
+        if (!slot.link.from) add("Connect Expression", M_CONNECTEXPR);
+        if (slot.link.from) add("Unlink", M_UNLINK);
         const dx5::Node* f = slot.link.from ? G().Find(slot.link.from) : nullptr;
-        if (f && f->type == "expr") AppendMenuW(m, MF_STRING, M_EXPAND, L"Expand Formula into Nodes");
-        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(m, MF_STRING, M_RESET, L"Reset");
+        if (f && f->type == "expr") add("Expand Formula into Nodes", M_EXPAND);
+        add("Reset", M_RESET);
     }
-    POINT sp = client;
-    ClientToScreen(g_win.wnd, &sp);
-    const int id = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, sp.x, sp.y, 0, g_win.wnd, nullptr);
-    DestroyMenu(m);
+    int id = PickMenu(client, items, false);
+    if (id == M_LINKMENU) {
+        // the macros, Int Macros first; one that cannot go in says why (design v5 6.2: a math node's typed input)
+        std::vector<MenuItem> mm;
+        for (int pass = 0; pass < 2; pass++) {
+            const bool mi = pass == 0;
+            MenuItem h;
+            h.text = mi ? "Int Macros" : "Macros", h.header = true;
+            mm.push_back(h);
+            const std::string why = dx5::LinkRefusal(G(), node, slot.name, mi ? dx5::Type::Int : dx5::Type::Float);
+            for (int k = 0; k < 32; k++) {
+                MenuItem it;
+                it.text = std::string(mi ? "I" : "M") + std::to_string(k + 1) + "  " + dx5::MacroLabel(s->graph, mi, k);
+                it.id = (mi ? M_LINKI : M_LINK) + k, it.enabled = why.empty();
+                if (!why.empty() && k == 0) it.hint = "not here";
+                mm.push_back(it);
+            }
+        }
+        id = PickMenu(client, mm, true);
+    }
     if (id == M_EXPOSE) {
         dx5::MacroWrite w;
         if (dx5::Expose(s->graph, node, slot.name, &w)) Commit("expose", {w});
@@ -1185,20 +1425,20 @@ void ValueMenu(POINT client, uint32_t node, int index)
         if (dx5::ExpandExpression(G(), slot.link.from)) Save("expand formula");
     } else if (id >= M_CHOICE && id < M_CHOICE + 64) {
         if (dx5::SetConst(G(), node, slot.name, id - M_CHOICE)) Save("set choice");
-    } else if (id >= M_LINK && id < M_LINK + 32) {
-        if (dx5::LinkMacro(G(), node, slot.name, false, id - M_LINK)) Save("link macro");
-    } else if (id >= M_LINKI && id < M_LINKI + 32) {
-        if (dx5::LinkMacro(G(), node, slot.name, true, id - M_LINKI)) Save("link int macro");
+    } else if ((id >= M_LINK && id < M_LINK + 32) || (id >= M_LINKI && id < M_LINKI + 32)) {
+        const bool mi = id >= M_LINKI;
+        if (dx5::LinkMacro(G(), node, slot.name, mi, id - (mi ? M_LINKI : M_LINK))) Save("link macro");
+        else Refused(dx5::LinkRefusal(G(), node, slot.name, mi ? dx5::Type::Int : dx5::Type::Float));
     }
     Redraw();
 }
 
-// Ctrl+G: the picked nodes (Shift-click) and the selected one become a group (design v5 12.1)
+// Ctrl+G: the picked nodes (Shift-click, a box) and the selected one become a group (design v5 12.1)
 void GroupPicked()
 {
     std::vector<uint32_t> nodes = g_win.multi;
     if (g_win.selected && std::find(nodes.begin(), nodes.end(), g_win.selected) == nodes.end()) nodes.push_back(g_win.selected);
-    if (nodes.empty()) return Refused("pick nodes first (Shift+click their titles), then Ctrl+G");
+    if (nodes.empty()) return Refused("pick nodes first (drag a box, or Shift+click their titles), then Ctrl+G");
     const dx5::Graph before = G();
     uint32_t gn = 0;
     if (!dx5::GroupSelection(G(), nodes, "", &gn)) {
@@ -1208,6 +1448,22 @@ void GroupPicked()
     Log("editor: group %s", G().Find(gn)->type.c_str());
     g_win.multi.clear(), g_win.selected = gn;
     Save("group");
+    Redraw();
+}
+
+// X / Delete: the selected nodes go
+void DeletePicked()
+{
+    std::vector<uint32_t> nodes = g_win.multi;
+    if (g_win.selected && std::find(nodes.begin(), nodes.end(), g_win.selected) == nodes.end()) nodes.push_back(g_win.selected);
+    bool any = false;
+    for (uint32_t id : nodes) {
+        const dx5::Node* n = G().Find(id);
+        if (!n || n->type == "param" || n->type == "param_geo" || n->type == "group_output") continue;  // a group's frame stays
+        any |= dx5::RemoveNode(G(), id);
+    }
+    g_win.selected = 0, g_win.multi.clear();
+    if (any) Save("remove node");
     Redraw();
 }
 
@@ -1233,33 +1489,37 @@ std::vector<uint32_t> FormulaTree(const dx5::Graph& g, uint32_t node)
     return set;
 }
 
-// right-click on a node: open it, copy a built-in group for yourself, ungroup, make a group, expand / collapse a formula
+// right-click on a node: open it, copy a built-in group for yourself, ungroup, make a group, expand / collapse a
+// formula, group, delete
 void NodeMenu(POINT client, uint32_t node)
 {
     const dx5::Node* n = G().Find(node);
     if (!n) return;
-    enum { N_OPEN = 800, N_COPY, N_UNGROUP, N_MAKE, N_EXPAND, N_COLLAPSE, N_GROUP };
+    enum { N_OPEN = 800, N_COPY, N_UNGROUP, N_MAKE, N_EXPAND, N_COLLAPSE, N_GROUP, N_DELETE };
     const bool builtin = dx5::FindDef(n->type) && dx5::FindDef(n->type)->group;
     const bool user = dx5::FindUserGroup(G(), n->type) != nullptr;
     const bool formula = dx5::IsMathFamily(n->type) || n->type == "expr";
-    HMENU m = CreatePopupMenu();
-    if (Openable(*n)) AppendMenuW(m, MF_STRING, N_OPEN, L"Open (Tab)");
-    if (builtin) AppendMenuW(m, MF_STRING, N_COPY, L"Copy for Myself");
-    if (user) AppendMenuW(m, MF_STRING, N_UNGROUP, L"Ungroup");
-    if (n->type == "expr") {
-        AppendMenuW(m, MF_STRING, N_MAKE, L"Make Group");
-        AppendMenuW(m, MF_STRING, N_EXPAND, L"Expand Formula into Nodes");
-    }
-    if (formula && n->type != "expr") AppendMenuW(m, MF_STRING, N_COLLAPSE, L"Collapse into Expression");
-    AppendMenuW(m, MF_STRING, N_GROUP, L"Group (Ctrl+G)");
-    const int id = Track(m, client);
-    DestroyMenu(m);
+    std::vector<MenuItem> items;
+    auto add = [&](const char* t, int id, const char* key = "") {
+        MenuItem it;
+        it.text = t, it.id = id, it.hint = key;
+        items.push_back(it);
+    };
+    if (Openable(*n)) add("Open", N_OPEN, "Tab");
+    if (builtin) add("Copy for Myself", N_COPY);
+    if (user) add("Ungroup", N_UNGROUP);
+    if (n->type == "expr") add("Make Group", N_MAKE), add("Expand Formula into Nodes", N_EXPAND);
+    if (formula && n->type != "expr") add("Collapse into Expression", N_COLLAPSE);
+    add("Group", N_GROUP, "Ctrl+G");
+    add("Delete", N_DELETE, "X");
+    const int id = PickMenu(client, items, false);
     const dx5::Graph before = G();
     std::string name;
     bool ok = false;
     const char* what = "";
     if (id == N_OPEN) return OpenNode(node);
     if (id == N_GROUP) return GroupPicked();
+    if (id == N_DELETE) return DeletePicked();
     if (id == N_COPY) ok = dx5::CopyGroupForSelf(G(), node, &name), what = "copy group";
     else if (id == N_UNGROUP) ok = dx5::UngroupNode(G(), node), what = "ungroup";
     else if (id == N_MAKE) ok = dx5::ExpressionToGroup(G(), node, &name), what = "make group";
@@ -1341,6 +1601,14 @@ LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
         return 0;
     }
     case WM_ERASEBKGND: return 1;
+    case WM_TIMER:
+        if (w == kProblemTimer && s) {
+            // the problems the render reported for this very graph (an older revision's are not shown)
+            std::vector<std::string> p;
+            if (!Problems(s->instance, s->graph.revision, &p)) p = g_win.problems;
+            if (p != g_win.problems) g_win.problems = p, Redraw();
+        }
+        return 0;
     case WM_SIZE:
         LayoutCode();
         Redraw();
@@ -1388,6 +1656,12 @@ LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
             g_win.selected = hi.node;
             g_win.drag = Drag::Move;
             g_win.startX = n->x, g_win.startY = n->y;
+            // the picked nodes move together when one of them is dragged (11/29)
+            g_win.moveFrom.clear();
+            std::vector<uint32_t> moving = g_win.multi;
+            if (std::find(moving.begin(), moving.end(), hi.node) == moving.end()) moving = {hi.node};
+            for (uint32_t id : moving)
+                if (const dx5::Node* m = G().Find(id)) g_win.moveFrom.push_back({id, {(long)std::lround(m->x * 100), (long)std::lround(m->y * 100)}});
         } else if (hi.what == Hit::GroupOpen) {
             g_win.selected = hi.node;
             OpenNode(hi.node);
@@ -1404,14 +1678,15 @@ LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
             g_win.selected = hi.node;
             const dx5::Node* n = G().Find(hi.node);
             if (!n) return 0;
-            HMENU m = CreatePopupMenu();
             const std::vector<const dx5::MathOpDef*> ops = dx5::MathOps(n->type);
-            for (size_t i = 0; i < ops.size(); i++)
-                AppendMenuW(m, MF_STRING | (ops[i]->op == n->text ? MF_CHECKED : 0), 700 + (UINT)i, W(ops[i]->op).c_str());
-            POINT sp = p;
-            ClientToScreen(h, &sp);
-            const int id = TrackPopupMenu(m, TPM_RETURNCMD, sp.x, sp.y, 0, h, nullptr);
-            DestroyMenu(m);
+            std::vector<MenuItem> items;
+            for (size_t i = 0; i < ops.size(); i++) {
+                MenuItem it;
+                it.text = ops[i]->op, it.id = 700 + (int)i, it.checked = ops[i]->op == n->text;
+                it.hint = std::to_string(ops[i]->arity) + (ops[i]->arity == 1 ? " input" : " inputs");
+                items.push_back(it);
+            }
+            const int id = PickMenu(p, items, true);
             std::string why;
             if (id >= 700 && id < 700 + (int)ops.size() && ops[id - 700]->op != n->text) {
                 const std::string op = ops[id - 700]->op;
@@ -1458,7 +1733,9 @@ LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
             er.right = std::max(er.right, er.left + 320);
             BeginEdit(er, n->text, g_win.zFont, true);
         } else if (hi.what == Hit::Canvas) {
-            g_win.selected = 0;
+            // a box from here picks the nodes it touches (Shift adds to the picked ones)
+            if (GetKeyState(VK_SHIFT) >= 0) g_win.selected = 0, g_win.multi.clear();
+            g_win.drag = Drag::Box;
         }
         if (g_win.drag != Drag::None) SetCapture(h);
         Redraw();
@@ -1477,7 +1754,8 @@ LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
         const int dx = p.x - g_win.start.x, dy = p.y - g_win.start.y;
         if (std::abs(dx) > 3 || std::abs(dy) > 3) g_win.moved = true;
         if (g_win.drag == Drag::Move) {
-            dx5::MoveNode(G(), g_win.dragNode, g_win.startX + dx / g_win.zoom, g_win.startY + dy / g_win.zoom);
+            for (const auto& m : g_win.moveFrom)
+                dx5::MoveNode(G(), m.first, m.second.x / 100.0 + dx / g_win.zoom, m.second.y / 100.0 + dy / g_win.zoom);
         } else if (g_win.drag == Drag::Wire) {
             g_win.snapNode = 0, g_win.snapInput = -1;
             FindSnap(p, &g_win.snapNode, &g_win.snapInput);
@@ -1487,10 +1765,10 @@ LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
             // only the window changes while dragging; the release writes once (design v4 7)
             dx5::Node* n = G().Find(g_win.dragNode);
             if (n && g_win.dragIndex < (int)n->inputs.size() && Scrubbable(*n, g_win.dragIndex)) {
-                const dx5::InputDef* d = InDef(*n, n->inputs[g_win.dragIndex].name);
-                double step = d ? (d->softMax - d->softMin) / 300.0 : 0.5;
-                if (GetKeyState(VK_SHIFT) < 0) step *= 10;
-                if (GetKeyState(VK_CONTROL) < 0) step *= 0.1;
+                // a pixel moved: 1 (Shift 10, Ctrl 0.1); an Int with Ctrl moves 1 every 10 pixels (the user, 11/29)
+                double step = 1.0;
+                if (GetKeyState(VK_SHIFT) < 0) step = 10.0;
+                if (GetKeyState(VK_CONTROL) < 0) step = 0.1;
                 dx5::SetConst(G(), n->id, n->inputs[g_win.dragIndex].name, g_win.startValue + dx * step);
             }
         }
@@ -1507,6 +1785,18 @@ LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
         const POINT p = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
         if (d == Drag::Move && g_win.moved) {
             Save("move node");
+        } else if (d == Drag::Box) {
+            if (g_win.moved) {
+                const RECT box = {std::min(g_win.start.x, p.x), std::min(g_win.start.y, p.y), std::max(g_win.start.x, p.x),
+                                  std::max(g_win.start.y, p.y)};
+                for (const dx5::Node& n : G().nodes) {
+                    const RECT r = NodeRect(n);
+                    RECT x;
+                    if (IntersectRect(&x, &r, &box) && std::find(g_win.multi.begin(), g_win.multi.end(), n.id) == g_win.multi.end())
+                        g_win.multi.push_back(n.id);
+                }
+                g_win.selected = g_win.multi.empty() ? 0 : g_win.multi.back();
+            }
         } else if (d == Drag::Wire) {
             // where it was let go: the input it snaps to, else an input under the cursor (refused with why)
             uint32_t toNode = 0;
@@ -1545,7 +1835,9 @@ LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
                     g_win.status.clear();
                     Save("link macro");
                 } else {
-                    Refused("a macro cannot feed " + n->inputs[hi.index].name);
+                    const std::string why = dx5::LinkRefusal(G(), n->id, n->inputs[hi.index].name,
+                                                             g_win.macroDragInt ? dx5::Type::Int : dx5::Type::Float);
+                    Refused(why.empty() ? "a macro cannot feed " + n->inputs[hi.index].name : why);
                 }
             }
             g_win.macroDragK = -1;
@@ -1600,12 +1892,9 @@ LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
         else if (hi.what == Hit::InPort) {
             const dx5::Node* n = G().Find(hi.node);
             if (n && n->inputs[hi.index].link.from) {
-                HMENU mm = CreatePopupMenu();
-                AppendMenuW(mm, MF_STRING, M_UNWIRE, L"Unwire");
-                POINT sp = p;
-                ClientToScreen(h, &sp);
-                const int id = TrackPopupMenu(mm, TPM_RETURNCMD | TPM_RIGHTBUTTON, sp.x, sp.y, 0, h, nullptr);
-                DestroyMenu(mm);
+                MenuItem it;
+                it.text = "Unwire", it.id = M_UNWIRE;
+                const int id = PickMenu(p, {it}, false);
                 if (id == M_UNWIRE && dx5::Disconnect(G(), hi.node, n->inputs[hi.index].name)) Save("unwire");
                 Redraw();
             }
@@ -1616,6 +1905,12 @@ LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (!s) return 0;
         const POINT p = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
         const HitInfo hi = HitTest(p);
+        // a second quick click on the "unused" heading folds it again (a double click is two clicks: 11/29)
+        if (hi.what == Hit::UnusedToggle) {
+            g_win.unusedOpen = !g_win.unusedOpen;
+            Redraw();
+            return 0;
+        }
         if (hi.what == Hit::Macro) {
             for (size_t row = 0; row < g_win.macroRows.size(); row++)
                 if (g_win.macroRows[row].k == hi.index && g_win.macroRows[row].isInt == hi.isInt) {
@@ -1630,10 +1925,15 @@ LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l)
     }
     case WM_KEYDOWN:
         if (!s) return 0;
-        if (w == VK_DELETE && g_win.selected && g_win.view == View::Nodes) {
-            if (dx5::RemoveNode(G(), g_win.selected)) Save("remove node");
-            g_win.selected = 0;
-            Redraw();
+        if ((w == VK_DELETE || (w == 'X' && GetKeyState(VK_CONTROL) >= 0)) && g_win.view == View::Nodes) {
+            DeletePicked();  // X or Delete (design: Blender's X)
+        } else if (w == 'A' && GetKeyState(VK_CONTROL) < 0 && g_win.view == View::Nodes) {
+            // Ctrl+A: the add menu at the cursor (typing searches it)
+            POINT cp;
+            GetCursorPos(&cp);
+            ScreenToClient(h, &cp);
+            if (!In(CanvasRect(), cp)) cp = {CanvasRect().left + 40, CanvasRect().top + 40};
+            AddMenu(cp);
         } else if (w == VK_HOME && g_win.view == View::Nodes) {
             FitAll();
         } else if (w == VK_TAB && g_win.view == View::Nodes) {
@@ -1700,6 +2000,7 @@ HWND CreateEditorWindow(Session* s)
                                960, 600, (HWND)owner, nullptr, inst, nullptr);
     g_win.wnd = wnd;
     if (wnd) ShowWindow(wnd, SW_SHOWNORMAL);
+    if (wnd) SetTimer(wnd, kProblemTimer, 500, nullptr);
     return wnd;
 }
 

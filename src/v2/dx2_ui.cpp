@@ -221,7 +221,9 @@ void DrawOverview(Canvas& c, PF_InData* in_data, const Rect& f, PF_ParamDef* par
 
     // the picture: the layout fitted into the box, seen straight on
     const float bottom = f.y + f.h - kPad - kButtonH - kGap;
-    const float box = std::max(20.0f, std::min(bottom - f.y - kPad, 96.0f));
+    // room for the problem line under the picture when there is one
+    const float warnH = r.warnings.empty() ? 0.0f : c.FontSize() * 1.5f;
+    const float box = std::max(20.0f, std::min(bottom - f.y - kPad - warnH, 96.0f));
     const Rect pic = {f.x + kPad, f.y + kPad, box, box};
     c.FillRound(pic, 6, c.Shade(0.08f));
     if (!r.elements.empty()) {
@@ -276,7 +278,12 @@ void DrawOverview(Canvas& c, PF_InData* in_data, const Rect& f, PF_ParamDef* par
         swprintf(line, 160, L"+ %d more", total - shown);
         c.Text(tx, y, line, c.Dim(), 0, tw);
     }
-    if (!r.warnings.empty()) c.Text(tx, bottom - 2, Wide(r.warnings[0]), {0.95f, 0.6f, 0.3f, 1}, 0, tw);
+    if (!r.warnings.empty()) {
+        // the whole width under the picture (beside it, it was cut off), and where the rest is
+        const float wx = f.x + kPad, ww = f.w - 2 * kPad;
+        const std::wstring head = r.warnings.size() == 1 ? L"\x26A0 " : L"\x26A0 " + std::to_wstring(r.warnings.size()) + L" problems (all in the editor): ";
+        c.Text(wx, bottom - 2, head + Wide(r.warnings[0]), {0.95f, 0.6f, 0.3f, 1}, 0, ww);
+    }
 
     for (const Button& b : Buttons(f)) {
         const std::wstring label = b.preset < 0 ? L"Open Editor" : Wide(dx5::Presets()[b.preset].name);

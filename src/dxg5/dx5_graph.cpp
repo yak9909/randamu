@@ -459,6 +459,21 @@ bool InputVisible(const Graph&, const Node& n, int k)
     return m && k < m->arity;
 }
 
+Type MathInputType(const Graph&, const Node& n, int k)
+{
+    const MathOpDef* m = MathOpOf(n);
+    return m && k >= 0 && k < m->arity ? m->inTypes[k] : Type::Any;
+}
+
+bool TypeFits(Type ot, Type it)
+{
+    if (it == Type::Any || ot == Type::Any || it == ot) return true;
+    const bool scalar = ot == Type::Float || ot == Type::Int || ot == Type::Bool;
+    if (it == Type::Float || it == Type::Int || it == Type::Bool) return scalar;
+    if (it == Type::Vector) return ot == Type::Float || ot == Type::Int;
+    return false;
+}
+
 bool LinkActive(const Graph& g, const Node& n, int k)
 {
     if (k < 0 || k >= (int)n.inputs.size()) return false;

@@ -40,6 +40,9 @@ bool SetFormula(Graph& g, uint32_t exprNode, const std::string& text, std::strin
 bool ConnectExpression(Graph& g, uint32_t id, const std::string& input);
 // A math node's operator (design v5 6.2). Its wires stay; those on inputs the operator does not use stop counting.
 bool SetMathOp(Graph& g, uint32_t id, const std::string& op, std::string* why);
+// Why a value of type `from` cannot go into this input ("" when it can): a math node's input takes what its operator
+// takes ("a of rot_apply is a Rotation: an Int cannot go in").
+std::string LinkRefusal(const Graph& g, uint32_t id, const std::string& input, Type from);
 // Wires Macro k+1 (or Int Macro k+1) into the input (one Macro node per macro, shared).
 bool LinkMacro(Graph& g, uint32_t id, const std::string& input, bool isInt, int k);
 // "Expose" (design v4 3): a free macro (an Int Macro for an Int input) takes the input's value now (returned in

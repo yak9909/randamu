@@ -81,6 +81,10 @@ A_u_longlong InstanceId(PF_InData* in_data);
 bool UpdateParamsUI(PF_InData* in_data, PF_ParamDef* params[]);
 // The layer names of Layer 1..8 ("" if none), for the Overview and the editor.
 void LayerNames(PF_InData* in_data, std::string out[kLayers]);
+// The problems the last evaluation of an instance's graph found (any thread: PreRender reports, the editor reads).
+// Kept with the graph's revision: the editor shows them only for the graph it has.
+void ReportProblems(A_u_longlong instance, uint32_t revision, const std::vector<std::string>& problems);
+bool Problems(A_u_longlong instance, uint32_t revision, std::vector<std::string>* out);
 
 // ---- the editor (dx2_editor.cpp) ----
 void OpenEditor(PF_InData* in_data);

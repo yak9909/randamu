@@ -106,10 +106,12 @@ TEST(math_type_mismatch_wire_inactive)
     std::string why;
     CHECK(SetMathOp(g, d, "dot", &why));
     const uint32_t r = AddNode(g, "rotate", "r", 0, 0);
-    CHECK(SetMathOp(g, r, "rot_mul", &why));
+    // wired under rot (three angles: the Float fits), then the operator changes to rot_mul (a Rotation): the wire
+    // stays and stops counting; a new wire of that kind is refused
     CHECK(Connect(g, d, 0, r, "a", &why));
+    CHECK(SetMathOp(g, r, "rot_mul", &why));
     CHECK(!LinkActive(g, *g.Find(r), 0));
-    // back to rot (three angles): the Float fits
+    CHECK(!Connect(g, d, 0, r, "b", &why));
     CHECK(SetMathOp(g, r, "rot", &why));
     CHECK(LinkActive(g, *g.Find(r), 0));
 }
@@ -139,4 +141,19 @@ TEST(math_disabled_wire_read_as_inactive)
     CHECK(Parse(text, &g));
     const Node* m = g.FindKey("m");
     CHECK(m && m->In("b")->link.from == 1 && !LinkActive(g, *m, 1));
+}
+
+TEST(math_link_refuses_wrong_type)
+{
+    // rot_apply: a is the rotation applied (Rotation), b the vector turned: a number (a macro) cannot feed a
+    Graph g;
+    const uint32_t r = AddNode(g, "rotate", "r", 0, 0);
+    std::string why;
+    CHECK(SetMathOp(g, r, "rot_apply", &why));
+    CHECK(!LinkMacro(g, r, "a", true, 0));
+    CHECK(LinkRefusal(g, r, "a", Type::Int).find("Rotation") != std::string::npos);
+    CHECK(LinkMacro(g, r, "b", true, 0));  // an Int spreads to a Vector
+    const uint32_t i = AddNode(g, "index", "i", 0, 0);
+    CHECK(!Connect(g, i, 0, r, "a", &why) && why.find("Rotation") != std::string::npos);
+    CHECK(MathInputType(g, *g.Find(r), 0) == Type::Rotation && MathInputType(g, *g.Find(r), 1) == Type::Vector);
 }

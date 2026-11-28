@@ -103,6 +103,10 @@ std::vector<OutputDef> OutputsOf(const Graph& g, const Node& n);
 const MathOpDef* MathOpOf(const Node& n);
 // The type an output gives (a math node's comes from its operator).
 Type OutputType(const Graph& g, const Node& n, int output);
+// The type a math node's input k takes under its operator (Any for other nodes and hidden inputs).
+Type MathInputType(const Graph& g, const Node& n, int k);
+// Can a value of type `from` go into an input of type `to` (Any fits all)?
+bool TypeFits(Type from, Type to);
 // Is input k drawn? (A math node hides the inputs its operator does not use: design v5 6.2.)
 bool InputVisible(const Graph& g, const Node& n, int k);
 // Does the wire into input k count? Not on a hidden input, nor when the output's type does not fit the operator's

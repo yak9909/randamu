@@ -188,6 +188,8 @@ PF_Err PreRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     ctx.layersSet = layersSet;
     const dxg::EvalResult res = dx5::Evaluate(*g, ctx);
     Dump(tSec, (int)in_result.ref_width, (int)in_result.ref_height, res);
+    // what went wrong, for the editor (the Overview has room for one line only)
+    ReportProblems(InstanceId(in_data), g->revision, res.warnings);
 
     // the copies: the 2x2 map Source px -> output px is D M D^-1 (D = the downsampling, M at full resolution)
     double ux0 = 1e300, uy0 = 1e300, ux1 = -1e300, uy1 = -1e300;

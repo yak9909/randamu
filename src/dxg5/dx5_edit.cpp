@@ -225,6 +225,11 @@ bool Connect(Graph& g, uint32_t from, int output, uint32_t to, const std::string
     }
     if (in && (in->structural || !in->field) && ot != Type::Geometry && IsField(g, from, output))
         return no(input + " cannot vary per element");
+    // a math node's input takes what its operator takes (design v5 6.2: rot_apply's a is a Rotation)
+    if (ot != Type::Geometry) {
+        const std::string r = LinkRefusal(g, to, input, ot);
+        if (!r.empty()) return no(r);
+    }
     if (Feeds(g, to, from)) return no("that would make a loop");
     slot->link = {from, output};
     return true;
@@ -390,12 +395,26 @@ bool ConnectExpression(Graph& g, uint32_t id, const std::string& input)
     return true;
 }
 
+std::string LinkRefusal(const Graph& g, uint32_t id, const std::string& input, Type from)
+{
+    const Node* n = g.Find(id);
+    if (!n) return "no such node";
+    int k = -1;
+    for (int i = 0; i < (int)n->inputs.size(); i++)
+        if (n->inputs[i].name == input) k = i;
+    const Type want = MathInputType(g, *n, k);
+    if (TypeFits(from, want)) return "";
+    const MathOpDef* m = MathOpOf(*n);
+    return input + " of " + (m ? m->op : n->type) + " is a " + TypeName(want) + ": a " + TypeName(from) + " cannot go in";
+}
+
 bool LinkMacro(Graph& g, uint32_t id, const std::string& input, bool isInt, int k)
 {
     Node* n = g.Find(id);
     if (!n || !n->In(input) || k < 0 || k >= 32) return false;
     const InputDef* d = DefOf(g, id, input);
     if (d && (!d->choices.empty() || d->type == Type::Geometry)) return false;
+    if (!LinkRefusal(g, id, input, isInt ? Type::Int : Type::Float).empty()) return false;
     const double x = n->x, y = n->y;
     const uint32_t m = MacroNode(g, isInt, k, x, y);
     g.Find(id)->In(input)->link = {m, 0};

@@ -302,3 +302,33 @@ void LayerNames(PF_InData* in_data, std::string out[kLayers])
 }
 
 }  // namespace dx2
+
+namespace dx2 {
+namespace {
+struct ProblemReport {
+    uint32_t revision = 0;
+    std::vector<std::string> problems;
+};
+std::mutex g_problemMu;
+std::map<A_u_longlong, ProblemReport> g_problems;
+}  // namespace
+
+void ReportProblems(A_u_longlong instance, uint32_t revision, const std::vector<std::string>& problems)
+{
+    if (!instance) return;
+    std::lock_guard<std::mutex> lk(g_problemMu);
+    ProblemReport& r = g_problems[instance];
+    r.revision = revision;
+    r.problems = problems;
+}
+
+bool Problems(A_u_longlong instance, uint32_t revision, std::vector<std::string>* out)
+{
+    std::lock_guard<std::mutex> lk(g_problemMu);
+    auto it = g_problems.find(instance);
+    if (it == g_problems.end() || it->second.revision != revision) return false;
+    *out = it->second.problems;
+    return true;
+}
+
+}  // namespace dx2
