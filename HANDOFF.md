@@ -1,5 +1,19 @@
 # 引き継ぎメモ（最新: 2026-11-28 17 時台（PC の時計）。再開はこの冒頭の「再開の手順」から）
 
+## 再開の手順（2026-11-28 深夜、計画 P1.5e 完了（`24c11c2`）。利用者への報告と試用の依頼で止める）
+
+- **P1.5e は全部済み:** Task 1〜6 と最終レビュー（文脈なし、opus）。レビューの Critical 2・Important 5 と M1 を直した（`24c11c2`、各々に失敗を確かめた試験
+  `tests/dxg5/test_final.cpp`）。**試験: `dxg5_test` ALL PASS（681 件）、AE `run_dx2_graph.ps1` 8・16・32 bpc DX2 GRAPH PASS、`run_dx2_p1_fixture.ps1` PASS。**
+- **実装時の判断:** 設計書 v5 の 19 節の最後の項に一覧（台帳は消した）。
+- **後回しにした小さな指摘（利用者に報告済み）:** `expr(index: 3)` の名前のぶつかりが注記だけ、`SameGraph` が向きで答えが変わりうる、
+  グループを直したとき使う側のグループの def を作り直さない、Ctrl+G の構造の入力が Float のまま、`OutputsOf(expr)` の毎回の読み直し、グループの出口ごとの再評価。
+- **未解決のトラブル:** AE の警告「After Effects エラー: 内部確認に失敗しました。{no current context}」が setup の直後（Idle Hook の最初の書き込みより前）に
+  出て試験が止まる。今夜 7 回中 3 回（8・32 bpc）、Task 9 でも 1 回。AE の中は追っていない。続けて 3 回 PASS したので、今回の変更の結果は確かめられた。
+- **利用者の回答待ち:** 試用（下）。G->G（v5 16 節の 3、保留）の答え。積み重ね表示（前の計画の Task 12・13）は G->G の答えの後。
+- **利用者に試してもらうこと（自動の試験で見ていない）:** 演算のノードの演算子の欄（クリックで一覧）、ノードの右クリック（Open・Copy for Myself・Ungroup・
+  Make Group・Expand・Collapse）、Shift+クリックと Ctrl+G、Expression の式の欄（複数行、Ctrl+Enter）、Tab で開いた中の編集（自分のグループ・Expression）と
+  ‹ Back、Macros の欄の unused の折り畳み、入力欄の右クリックの Connect Expression。
+
 ## 再開の手順（2026-11-28 夜遅く、計画 P1.5e の Task 1〜6 済み。Task 7（最終レビュー）中）
 
 - **済み（続き）:** Task 5 `f6a102c`（自分用にコピー・Ctrl+G・Ungroup・Make Group・複数の出口の Collapse・unused のマクロ・台本の命令）、
