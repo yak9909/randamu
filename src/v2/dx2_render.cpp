@@ -41,7 +41,6 @@ struct Copy {
     double ia, ib, ic, id;   // the inverse of the 2x2 map from Source px to output px
     double pivX, pivY;
     float opacity;
-    int n;                   // samples per axis per output pixel (more when the copy is smaller than its Source)
     bool translate;          // moved only (no turn, no scale): the same bilinear weights all along a row
     int x0, y0, x1, y1;      // its bounds in output layer coordinates
 };
@@ -210,10 +209,9 @@ PF_Err PreRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
         cp.ia = dd / det, cp.ib = -b / det, cp.ic = -c / det, cp.id = a / det;
         cp.pivX = s.pivX, cp.pivY = s.pivY;
         cp.opacity = (float)std::min(1.0, e.opacity);
-        // the smallest stretch of the map (singular value): how many Source px one output px spans at most
-        const double p2 = a * a + b * b + c * c + dd * dd;
-        const double smin = std::sqrt(std::max(0.0, (p2 - std::sqrt(std::max(0.0, p2 * p2 - 4 * det * det))) * 0.5));
-        cp.n = std::clamp((int)std::ceil(1.0 / std::max(smin, 1e-6)), 1, 8);
+        // one bilinear sample per output pixel, as DupliX's fast mode (src/core/raster.cpp) draws: n x n samples for a
+        // copy smaller than its Source (up to 64) made Copy Scale 25% cost 7.5 times 100% (11/29, dx2_perf_compare.jsx:
+        // 1013 ms against 135 ms for 25 copies of 1920 x 1080)
         cp.translate = std::fabs(cp.ia - 1) < 1e-9 && std::fabs(cp.id - 1) < 1e-9 && std::fabs(cp.ib) < 1e-9 &&
                        std::fabs(cp.ic) < 1e-9;
         double bx0 = 1e300, by0 = 1e300, bx1 = -1e300, by1 = -1e300;
@@ -348,13 +346,17 @@ inline __m128 Bilinear(const Img& img, double x, double y)
     return _mm_add_ps(_mm_mul_ps(top, _mm_set1_ps(1 - fy)), _mm_mul_ps(bot, _mm_set1_ps(fy)));
 }
 
-// premultiplied "over": d = s k + d (1 - s.a k)
-inline void Over(Px* d, __m128 s, __m128 k)
+// The copies are drawn nearest first (the list's last first), each UNDER what is there: d = d + s k (1 - d.a). The
+// result is the same as "over" from the first; a pixel already opaque takes no more samples (DupliX's fast mode skips
+// what an opaque copy hides the same way, src/core/raster.cpp: 11/29, 25 opaque copies at 300% took 0.7-1.9 s).
+constexpr float kOpaque = 0.9999f;
+inline void Under(Px* d, __m128 s, __m128 k)
 {
-    s = _mm_mul_ps(s, k);
-    const __m128 t = _mm_sub_ps(_mm_set1_ps(1.0f), _mm_shuffle_ps(s, s, 0));
-    _mm_storeu_ps(&d->a, _mm_add_ps(s, _mm_mul_ps(V(d), t)));
+    const __m128 dv = V(d);
+    const __m128 t = _mm_sub_ps(_mm_set1_ps(1.0f), _mm_shuffle_ps(dv, dv, 0));
+    _mm_storeu_ps(&d->a, _mm_add_ps(dv, _mm_mul_ps(_mm_mul_ps(s, k), t)));
 }
+inline bool Opaque(const Px* d) { return d->a >= kOpaque; }
 
 // The part [x0, x1) of row Y (output layer coordinates, pixel centres at x + 0.5) whose sample of a copy falls
 // inside its Source (with the border): solves lo <= p0 + q * X <= hi for X on both axes.
@@ -385,72 +387,61 @@ bool Span(const Copy& c, const Img& img, int Y, int* xa, int* xb)
 template <class P>
 void DrawRows(PF_EffectWorld* out, const Pre& pre, const Img* const* imgs, int yBegin, int yEnd)
 {
-    const int ox = pre.out.left, oy = pre.out.top;
-    std::vector<Px> acc((size_t)out->width);  // the row, premultiplied
+    const int ox = pre.out.left, oy = pre.out.top, W = (int)out->width;
+    std::vector<Px> acc((size_t)W);  // the row, premultiplied
     for (int y = yBegin; y < yEnd; y++) {
         P* row = (P*)((char*)out->data + (size_t)y * out->rowbytes);
         std::fill(acc.begin(), acc.end(), Px{0, 0, 0, 0});
         bool any = false;
+        int opaque = 0;  // pixels of the row already opaque: when all are, the copies behind are not drawn
         const int Y = y + oy;
-        for (const Copy& c : pre.copies) {
+        for (auto it = pre.copies.rbegin(); it != pre.copies.rend() && opaque < W; ++it) {
+            const Copy& c = *it;
             if (Y < c.y0 || Y >= c.y1) continue;
             const Img* img = imgs[c.src];
             if (!img) continue;
-            if (c.n == 1) {
-                int xa = 0, xb = 0;
-                if (!Span(c, *img, Y, &xa, &xb)) continue;
-                xa = std::max(xa, ox), xb = std::min(xb, ox + (int)out->width);
-                if (xa >= xb) continue;
-                any = true;
-                const __m128 k = _mm_set1_ps(c.opacity);
-                const double dy = Y + 0.5 - c.py;
-                double sx = c.pivX + c.ia * (xa + 0.5 - c.px) + c.ib * dy;
-                double sy = c.pivY + c.ic * (xa + 0.5 - c.px) + c.id * dy;
-                Px* d = &acc[(size_t)(xa - ox)];
-                if (c.translate) {
-                    // moved only: the same weights all along the row (one tap when the pixels line up)
-                    const double fx0 = sx - 0.5, fy0 = sy - 0.5;
-                    const int x0 = (int)std::floor(fx0), y0 = (int)std::floor(fy0);
-                    const float fx = (float)(fx0 - x0), fy = (float)(fy0 - y0);
-                    const Px* p = img->At(x0, y0);
-                    const int n = xb - xa;
-                    if (fx < 1e-4f && fy < 1e-4f) {
-                        for (int i = 0; i < n; i++) Over(d + i, V(p + i), k);
-                    } else {
-                        const __m128 wa = _mm_set1_ps((1 - fx) * (1 - fy)), wb = _mm_set1_ps(fx * (1 - fy));
-                        const __m128 wc = _mm_set1_ps((1 - fx) * fy), wd = _mm_set1_ps(fx * fy);
-                        const Px* q = p + img->stride;
-                        for (int i = 0; i < n; i++) {
-                            const __m128 s = _mm_add_ps(_mm_add_ps(_mm_mul_ps(V(p + i), wa), _mm_mul_ps(V(p + i + 1), wb)),
-                                                        _mm_add_ps(_mm_mul_ps(V(q + i), wc), _mm_mul_ps(V(q + i + 1), wd)));
-                            Over(d + i, s, k);
-                        }
-                    }
+            int xa = 0, xb = 0;
+            if (!Span(c, *img, Y, &xa, &xb)) continue;
+            xa = std::max(xa, ox), xb = std::min(xb, ox + W);
+            if (xa >= xb) continue;
+            any = true;
+            const __m128 k = _mm_set1_ps(c.opacity);
+            const double dy = Y + 0.5 - c.py;
+            double sx = c.pivX + c.ia * (xa + 0.5 - c.px) + c.ib * dy;
+            double sy = c.pivY + c.ic * (xa + 0.5 - c.px) + c.id * dy;
+            Px* d = &acc[(size_t)(xa - ox)];
+            const int n = xb - xa;
+            auto put = [&](Px* q, __m128 s) {
+                Under(q, s, k);
+                if (Opaque(q)) opaque++;
+            };
+            if (c.translate) {
+                // moved only: the same weights all along the row (one tap when the pixels line up)
+                const double fx0 = sx - 0.5, fy0 = sy - 0.5;
+                const int x0 = (int)std::floor(fx0), y0 = (int)std::floor(fy0);
+                const float fx = (float)(fx0 - x0), fy = (float)(fy0 - y0);
+                const Px* p = img->At(x0, y0);
+                if (fx < 1e-4f && fy < 1e-4f) {
+                    for (int i = 0; i < n; i++)
+                        if (!Opaque(d + i)) put(d + i, V(p + i));
                 } else {
-                    for (int X = xa; X < xb; X++, d++, sx += c.ia, sy += c.ic) Over(d, Bilinear(*img, sx, sy), k);
-                }
-                continue;
-            }
-            // smaller than its Source: n x n samples per pixel, each inside the Source (with the border)
-            const int xa = std::max(c.x0, ox), xb = std::min(c.x1, ox + (int)out->width);
-            const double step = 1.0 / c.n;
-            const __m128 k = _mm_set1_ps(c.opacity / (float)(c.n * c.n));
-            for (int X = xa; X < xb; X++) {
-                __m128 s = _mm_setzero_ps();
-                for (int j = 0; j < c.n; j++)
-                    for (int i = 0; i < c.n; i++) {
-                        const double dx = X + (i + 0.5) * step - c.px, dy = Y + (j + 0.5) * step - c.py;
-                        const double sx = c.pivX + c.ia * dx + c.ib * dy, sy = c.pivY + c.ic * dx + c.id * dy;
-                        if (sx < -0.5 || sy < -0.5 || sx >= img->w + 0.4999 || sy >= img->h + 0.4999) continue;
-                        s = _mm_add_ps(s, Bilinear(*img, sx, sy));
+                    const __m128 wa = _mm_set1_ps((1 - fx) * (1 - fy)), wb = _mm_set1_ps(fx * (1 - fy));
+                    const __m128 wc = _mm_set1_ps((1 - fx) * fy), wd = _mm_set1_ps(fx * fy);
+                    const Px* q = p + img->stride;
+                    for (int i = 0; i < n; i++) {
+                        if (Opaque(d + i)) continue;
+                        const __m128 s = _mm_add_ps(_mm_add_ps(_mm_mul_ps(V(p + i), wa), _mm_mul_ps(V(p + i + 1), wb)),
+                                                    _mm_add_ps(_mm_mul_ps(V(q + i), wc), _mm_mul_ps(V(q + i + 1), wd)));
+                        put(d + i, s);
                     }
-                if (_mm_cvtss_f32(s) <= 0) continue;
-                Over(&acc[(size_t)(X - ox)], s, k);
-                any = true;
+                }
+            } else {
+                for (int i = 0; i < n; i++, sx += c.ia, sy += c.ic)
+                    if (!Opaque(d + i)) put(d + i, Bilinear(*img, sx, sy));
             }
         }
         if (any)
-            for (int x = 0; x < out->width; x++) Store(row[x], acc[(size_t)x]);
+            for (int x = 0; x < W; x++) Store(row[x], acc[(size_t)x]);
     }
 }
 
